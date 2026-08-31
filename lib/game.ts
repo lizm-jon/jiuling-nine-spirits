@@ -39,6 +39,17 @@ export type PracticeCardValue = {
   delta: number;
   recommended: boolean;
   target: { row: number; column: number } | null;
+  placements: PracticePlacementValue[];
+};
+
+export type PracticePlacementValue = {
+  row: number;
+  column: number;
+  expectedScore: number;
+  validRate: number;
+  gap: number;
+  recommended: boolean;
+  bestForCard: boolean;
 };
 
 export type PracticeOutcome = {
@@ -340,17 +351,19 @@ function bestHeuristicBoard(board: Board, hand: Card[], placeCount: number): Boa
 
 function bestFinalOption(board: Board, hand: Card[], placeCount: number): PlacementOption {
   const options = placementOptions(board, hand, placeCount);
-  return options.reduce((best, option) => {
+  let best = options[0];
+  let bestResult = evaluateBoard(best.board);
+  let bestTieBreak = bestResult.baseScore * 100 + best.heuristic;
+  options.slice(1).forEach((option) => {
     const result = evaluateBoard(option.board);
     const tieBreak = result.baseScore * 100 + option.heuristic;
-    const bestResult = evaluateBoard(best.board);
-    const bestTieBreak = bestResult.baseScore * 100 + best.heuristic;
-    return result.total > bestResult.total || (result.total === bestResult.total && tieBreak > bestTieBreak) ? option : best;
+    if (result.total > bestResult.total || (result.total === bestResult.total && tieBreak > bestTieBreak)) {
+      best = option;
+      bestResult = result;
+      bestTieBreak = tieBreak;
+    }
   });
-}
-
-function bestFinalScore(board: Board, hand: Card[], placeCount: number): number {
-  return evaluateBoard(bestFinalOption(board, hand, placeCount).board).total;
+  return best;
 }
 
 function makeSeed(board: Board, hand: Card[], waveIndex: number): number {
@@ -382,13 +395,17 @@ function sampleCards(pool: Card[], count: number, random: () => number): Card[] 
   return copy.slice(0, count);
 }
 
-function uniqueShortlist(options: PlacementOption[], hand: Card[]): PlacementOption[] {
+function uniqueShortlist(options: PlacementOption[], hand: Card[], board: Board): PlacementOption[] {
   const ranked = [...options].sort((left, right) => right.heuristic - left.heuristic);
   const chosen = new Set<PlacementOption>();
   ranked.slice(0, 32).forEach((option) => chosen.add(option));
   hand.forEach((card) => {
     ranked.filter((option) => option.usedIds.has(card.id)).slice(0, 12).forEach((option) => chosen.add(option));
     ranked.filter((option) => !option.usedIds.has(card.id)).slice(0, 12).forEach((option) => chosen.add(option));
+    board.forEach((row, rowIndex) => row.forEach((slotCard, column) => {
+      if (slotCard) return;
+      ranked.filter((option) => option.board[rowIndex][column]?.id === card.id).slice(0, 4).forEach((option) => chosen.add(option));
+    }));
   });
   return [...chosen];
 }
@@ -473,32 +490,41 @@ export function analyzePracticeMove(
   hand: Card[],
   unseenPool: Card[],
   waveIndex: number,
+  placeCountOverride?: number,
 ): PracticeAnalysis {
-  const placeCount = [3, 3, 2][waveIndex];
+  const placeCount = placeCountOverride ?? [3, 3, 2][waveIndex];
   const allOptions = placementOptions(board, hand, placeCount);
-  const evaluatedOptions = waveIndex === 0 ? uniqueShortlist(allOptions, hand) : allOptions;
+  const evaluatedOptions = waveIndex === 0 ? uniqueShortlist(allOptions, hand, board) : allOptions;
   const sampleCount = waveIndex === 0 ? 24 : waveIndex === 1 ? 40 : 1;
   const random = seededRandom(makeSeed(board, hand, waveIndex));
   const rollouts = Array.from({ length: sampleCount }, () => sampleCards(unseenPool, waveIndex === 0 ? 7 : waveIndex === 1 ? 3 : 0, random));
   const values = new Map<PlacementOption, number>();
+  const validRates = new Map<PlacementOption, number>();
 
   evaluatedOptions.forEach((option) => {
     if (waveIndex === 2) {
-      values.set(option, evaluateBoard(option.board).total);
+      const result = evaluateBoard(option.board);
+      values.set(option, result.total);
+      validRates.set(option, result.bust ? 0 : 1);
       return;
     }
     let total = 0;
+    let validCount = 0;
     rollouts.forEach((rollout) => {
+      let result: BoardResult;
       if (waveIndex === 1) {
-        total += bestFinalScore(option.board, rollout, 2);
-        return;
+        result = evaluateBoard(bestFinalOption(option.board, rollout, 2).board);
+      } else {
+        const secondHand = rollout.slice(0, 4);
+        const finalHand = rollout.slice(4, 7);
+        const secondBoard = bestHeuristicBoard(option.board, secondHand, 3);
+        result = evaluateBoard(bestFinalOption(secondBoard, finalHand, 2).board);
       }
-      const secondHand = rollout.slice(0, 4);
-      const finalHand = rollout.slice(4, 7);
-      const secondBoard = bestHeuristicBoard(option.board, secondHand, 3);
-      total += bestFinalScore(secondBoard, finalHand, 2);
+      total += result.total;
+      if (!result.bust) validCount += 1;
     });
     values.set(option, total / sampleCount);
+    validRates.set(option, validCount / sampleCount);
   });
 
   const bestOption = evaluatedOptions.reduce((best, option) => (
@@ -520,6 +546,10 @@ export function analyzePracticeMove(
     };
   }).sort((left, right) => right.expectedScore - left.expectedScore
     || Number(right.card.id === discarded?.id) - Number(left.card.id === discarded?.id));
+  const availableSlots: Slot[] = [];
+  board.forEach((row, rowIndex) => row.forEach((slotCard, column) => {
+    if (!slotCard) availableSlots.push([rowIndex, column]);
+  }));
   const cards: Record<string, PracticeCardValue> = {};
   hand.forEach((card) => {
     const playing = evaluatedOptions.filter((option) => option.usedIds.has(card.id));
@@ -532,12 +562,36 @@ export function analyzePracticeMove(
     bestOption.board.forEach((row, rowIndex) => row.forEach((placedCard, column) => {
       if (placedCard?.id === card.id && board[rowIndex][column] === null) target = { row: rowIndex, column };
     }));
+    const placements = availableSlots.map(([row, column]) => {
+      const candidates = evaluatedOptions.filter((option) => option.board[row][column]?.id === card.id);
+      const bestPlacement = candidates.reduce((best, option) => {
+        const optionValue = values.get(option) ?? Number.NEGATIVE_INFINITY;
+        const bestValue = values.get(best) ?? Number.NEGATIVE_INFINITY;
+        if (optionValue !== bestValue) return optionValue > bestValue ? option : best;
+        return (validRates.get(option) ?? 0) > (validRates.get(best) ?? 0) ? option : best;
+      });
+      const expectedScore = values.get(bestPlacement) ?? 0;
+      return {
+        row,
+        column,
+        expectedScore,
+        validRate: validRates.get(bestPlacement) ?? 0,
+        gap: bestExpected - expectedScore,
+        recommended: target?.row === row && target.column === column,
+        bestForCard: false,
+      };
+    });
+    const bestPlacementExpected = Math.max(...placements.map((placement) => placement.expectedScore));
+    placements.forEach((placement) => {
+      placement.bestForCard = Math.abs(placement.expectedScore - bestPlacementExpected) < 0.001;
+    });
     cards[card.id] = {
       playExpected,
       discardExpected,
       delta: playExpected - discardExpected,
       recommended: bestOption.usedIds.has(card.id),
       target,
+      placements,
     };
   });
 

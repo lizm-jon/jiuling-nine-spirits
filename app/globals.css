@@ -174,6 +174,12 @@ button:focus-visible { outline: 3px solid rgba(119, 73, 132, .35); outline-offse
 .slot-plus { font-size: 21px; font-weight: 300; }
 .recommendation-ghost { width: 58px; height: 80px; display: grid; place-content: center; justify-items: center; gap: 4px; border: 1px solid currentColor; border-radius: 10px; background: rgba(255,255,255,.45); opacity: .48; }
 .recommendation-ghost b { font: 27px serif; }.recommendation-ghost small { font: 7px sans-serif; letter-spacing: 0; }
+.card-slot.has-position-forecast { border-style: solid; border-color: rgba(103,68,110,.2); background: rgba(255,255,255,.72); animation: none; }
+.card-slot.is-best-position { border-color: rgba(184,133,49,.65); box-shadow: 0 0 0 3px rgba(184,133,49,.1); }
+.position-forecast { width: 58px; height: 80px; display: grid; place-content: center; justify-items: center; position: relative; border-radius: 10px; background: linear-gradient(145deg, rgba(255,255,255,.92), rgba(240,233,242,.78)); }
+.position-forecast b { color: #56395c; font: 24px/1 serif; }.position-forecast small { margin-top: 3px; color: #8d8290; font: 7px sans-serif; }.position-forecast em { margin-top: 7px; padding: 3px 5px; border-radius: 5px; background: #e7f0e9; color: #47705a; font: normal 8px sans-serif; }.position-forecast > i { position: absolute; left: 50%; bottom: -8px; transform: translateX(-50%); padding: 2px 6px; border-radius: 6px; background: #b78332; color: #fff; font: normal 7px sans-serif; white-space: nowrap; }
+.position-forecast-loading { width: 58px; height: 80px; display: grid; place-content: center; justify-items: center; gap: 7px; color: #8b808e; font: 8px sans-serif !important; }
+.position-forecast-loading i { width: 18px; height: 18px; border: 2px solid rgba(95,61,102,.13); border-top-color: #76507c; border-radius: 50%; animation: spin .8s linear infinite; }
 .match-badge { position: absolute; z-index: 3; left: 50%; bottom: -8px; transform: translateX(-50%); padding: 2px 6px; border-radius: 6px; background: #bd8c3c; color: #fff; font: 8px sans-serif !important; white-space: nowrap; }
 .discard-tag { position: absolute; z-index: 3; left: 50%; bottom: -8px; transform: translateX(-50%); padding: 2px 7px; border-radius: 6px; background: #9b4351; color: #fff; font-size: 9px; white-space: nowrap; }
 .analysis-badge { position: absolute; z-index: 3; right: -5px; top: -7px; padding: 3px 6px; border-radius: 7px; background: #8b818d; color: #fff; font-size: 8px; box-shadow: 0 4px 9px rgba(50,38,55,.15); }
@@ -323,6 +329,7 @@ button:focus-visible { outline: 3px solid rgba(119, 73, 132, .35); outline-offse
   .playing-card { width: min(18.5vw, 68px); height: min(25vw, 94px); }
   .card-face > strong { font-size: 31px; }
   .recommendation-ghost { width: 51px; height: 72px; }.recommendation-ghost b { font-size: 23px; }
+  .position-forecast, .position-forecast-loading { width: 51px; height: 72px; }.position-forecast b { font-size: 21px; }.position-forecast em { margin-top: 5px; font-size: 7px; }
   .practice-summary small { max-width: 180px; }
   .report-header h2 { font-size: 25px; }.report-header > div > p:last-child { max-width: 250px; }.report-metrics > div { min-height: 65px; padding: 9px 11px; }.report-metrics strong { font-size: 23px; }.report-section-heading { align-items: flex-end; }.report-section-heading > small { max-width: 145px; }.outcome-card { min-height: 70px; }.discard-option { grid-template-columns: 36px 1fr 44px 58px; gap: 6px; padding: 7px; }.report-actions { position: sticky; bottom: -21px; margin: 15px -14px -21px; padding: 12px 14px; background: rgba(249,246,241,.94); backdrop-filter: blur(10px); }
   .opponent-tabs button { font-size: 8px; }.opponent-tabs .avatar { width: 24px; height: 24px; }

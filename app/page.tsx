@@ -86,6 +86,7 @@ export default function Home() {
   const [discardedIds, setDiscardedIds] = useState<string[]>([]);
   const [opponentPreview, setOpponentPreview] = useState<number | null>(null);
   const [practiceReportOpen, setPracticeReportOpen] = useState(false);
+  const [positionAnalysis, setPositionAnalysis] = useState<PracticeAnalysis | null>(null);
 
   const playerBoard = boards[0];
   const placeTarget = PLACE_COUNTS[wave];
@@ -123,6 +124,20 @@ export default function Home() {
     return () => window.clearTimeout(timer);
   }, [hand, practiceKnownKey, practiceMode, processing, results, started, wave, waveStartBoard]);
 
+  useEffect(() => {
+    if (!practiceMode || !started || processing || results || !selectedCardId || placedCount === 0) return;
+    const remainingHand = hand.filter((card) => !placedIds.includes(card.id));
+    if (!remainingHand.some((card) => card.id === selectedCardId)) return;
+    const remainingPlaceCount = placeTarget - placedCount;
+    if (remainingPlaceCount < 1) return;
+    const timer = window.setTimeout(() => {
+      const knownIds = new Set<string>(practiceKnownKey ? practiceKnownKey.split('|') : []);
+      const unseenPool = createFullDeck().filter((card) => !knownIds.has(card.id));
+      setPositionAnalysis(analyzePracticeMove(playerBoard, remainingHand, unseenPool, wave, remainingPlaceCount));
+    }, 60);
+    return () => window.clearTimeout(timer);
+  }, [hand, placeTarget, placedCount, placedIds, playerBoard, practiceKnownKey, practiceMode, processing, results, selectedCardId, started, wave]);
+
   function startGame(mode = practiceMode) {
     const freshBoards = Array.from({ length: 6 }, createEmptyBoard);
     const dealt = dealWave(createDeck(), DEAL_COUNTS[0]);
@@ -144,12 +159,14 @@ export default function Home() {
     setDiscardedIds([]);
     setOpponentPreview(null);
     setPracticeReportOpen(false);
+    setPositionAnalysis(null);
   }
 
   function selectHandCard(card: Card) {
     if (processing) return;
     if (practiceMode) setAnalysisCardId(card.id);
-    setSelectedCardId((current) => current === card.id ? null : card.id);
+    setPositionAnalysis(null);
+    setSelectedCardId(selectedCardId === card.id ? null : card.id);
   }
 
   function clickBoardSlot(rowIndex: number, cardIndex: number) {
@@ -164,6 +181,7 @@ export default function Home() {
       setBoards(nextBoards);
       setPlacedIds((current) => current.filter((id) => id !== existing.id));
       setSelectedCardId(existing.id);
+      setPositionAnalysis(null);
       if (practiceMode) setAnalysisCardId(existing.id);
       return;
     }
@@ -177,12 +195,14 @@ export default function Home() {
     setBoards(nextBoards);
     setPlacedIds((current) => [...current, selectedCard.id]);
     setSelectedCardId(null);
+    setPositionAnalysis(null);
   }
 
   function confirmPlacement() {
     if (!readyToConfirm) return;
     setProcessing(true);
     setPracticeReportOpen(false);
+    setPositionAnalysis(null);
     const currentBoards = boards.map(cloneBoard);
     const currentAiHands = aiHands.map((cards) => [...cards]);
     const currentWave = wave;
@@ -214,6 +234,7 @@ export default function Home() {
       setPlacedIds([]);
       setSelectedCardId(null);
       setPracticeAnalysis(null);
+      setPositionAnalysis(null);
       setAnalysisCardId(null);
       setProcessing(false);
     }, 560);
@@ -231,6 +252,7 @@ export default function Home() {
     setBoards(nextBoards);
     setPlacedIds(recommendedIds);
     setSelectedCardId(null);
+    setPositionAnalysis(null);
     setAnalysisCardId(practiceAnalysis.report.discarded?.id ?? null);
     setPracticeReportOpen(false);
   }
@@ -244,7 +266,12 @@ export default function Home() {
 
   const selectedResult = results?.[inspectedPlayer] ?? null;
   const selectedPracticeCard = analysisCardId ? hand.find((card) => card.id === analysisCardId) ?? null : null;
-  const selectedPracticeValue = selectedPracticeCard && practiceAnalysis ? practiceAnalysis.cards[selectedPracticeCard.id] : null;
+  const activePositionAnalysis = placedCount === 0 ? practiceAnalysis : positionAnalysis;
+  const selectedPositionValue = selectedCardId ? activePositionAnalysis?.cards[selectedCardId] ?? null : null;
+  const selectedPracticeValue = selectedPracticeCard
+    ? (selectedCardId === selectedPracticeCard.id ? selectedPositionValue : practiceAnalysis?.cards[selectedPracticeCard.id]) ?? null
+    : null;
+  const analyzingPositions = Boolean(practiceMode && selectedCardId && !selectedPositionValue && !processing);
   const publicOpponentCards = opponentPreview ? boards[opponentPreview].flat().filter(Boolean).length : 0;
   const totalPublicOpponentCards = boards.slice(1).flat(2).filter(Boolean).length;
   const recommendedPracticeIds = practiceAnalysis?.recommendation
@@ -266,8 +293,8 @@ export default function Home() {
         </button>
         <div className="top-actions">
           <div className="mode-switch" role="group" aria-label="游戏模式">
-            <button type="button" aria-pressed={!practiceMode} onClick={() => { setPracticeAnalysis(null); setPracticeReportOpen(false); setPracticeMode(false); }}>普通</button>
-            <button type="button" aria-pressed={practiceMode} onClick={() => { setPracticeAnalysis(null); setPracticeReportOpen(false); setPracticeMode(true); }}>练习</button>
+            <button type="button" aria-pressed={!practiceMode} onClick={() => { setPracticeAnalysis(null); setPositionAnalysis(null); setPracticeReportOpen(false); setPracticeMode(false); }}>普通</button>
+            <button type="button" aria-pressed={practiceMode} onClick={() => { setPracticeAnalysis(null); setPositionAnalysis(null); setPracticeReportOpen(false); setPracticeMode(true); }}>练习</button>
           </div>
           <button className="text-button" type="button" onClick={() => setRulesOpen(true)}>玩法规则</button>
           <button className="new-game-button" type="button" onClick={() => startGame(practiceMode)} disabled={processing}>
@@ -302,7 +329,7 @@ export default function Home() {
             <div>
               <p className="eyebrow">{started ? WAVE_NAMES[wave] : '六人牌局 · 三波成阵'}{practiceMode && <span className="practice-chip">练习模式</span>}</p>
               <h1>{started ? (processing ? '灵阵推演中…' : `选 ${placeTarget} 张，落入牌阵`) : '八张成阵，强弱有序'}</h1>
-              <p>{started ? `点选手牌，再选择空位；本波会弃掉 ${DEAL_COUNTS[wave] - PLACE_COUNTS[wave]} 张。` : '把牌摆成上二、中三、下三；牌力必须逐行增强。'}</p>
+              <p>{started ? practiceMode && selectedCardId ? '每个空位正显示所选牌落下后的得分期望与不炸率。' : `点选手牌，再选择空位；本波会弃掉 ${DEAL_COUNTS[wave] - PLACE_COUNTS[wave]} 张。` : '把牌摆成上二、中三、下三；牌力必须逐行增强。'}</p>
             </div>
             <div className="round-meter" aria-label={started ? `第 ${wave + 1} 波，共三波` : '等待开局'}>
               <b>{started ? String(wave + 1).padStart(2, '0') : '—'}</b><span>/ 03</span>
@@ -328,16 +355,34 @@ export default function Home() {
                     const recommendedCard = practiceAnalysis && !waveStartBoard[rowIndex][cardIndex]
                       ? practiceAnalysis.recommendation[rowIndex][cardIndex]
                       : null;
+                    const placementForecast = selectedPositionValue?.placements.find((placement) => (
+                      placement.row === rowIndex && placement.column === cardIndex
+                    ));
                     const recommendationMatched = Boolean(card && recommendedCard?.id === card.id);
                     return (
                       <button
-                        className={`card-slot ${card ? 'is-filled' : ''} ${card && placedIds.includes(card.id) ? 'is-new' : ''} ${!card && selectedCardId ? 'is-target' : ''} ${recommendationMatched ? 'is-recommended-match' : ''}`}
+                        className={`card-slot ${card ? 'is-filled' : ''} ${card && placedIds.includes(card.id) ? 'is-new' : ''} ${!card && selectedCardId ? 'is-target' : ''} ${recommendationMatched ? 'is-recommended-match' : ''} ${placementForecast ? 'has-position-forecast' : ''} ${placementForecast?.bestForCard ? 'is-best-position' : ''}`}
                         type="button"
                         key={card?.id ?? `${rowIndex}-${cardIndex}`}
                         onClick={() => clickBoardSlot(rowIndex, cardIndex)}
-                        aria-label={card ? `${ROW_NAMES[rowIndex]} ${COLOR_NAMES[card.color]}色 ${card.number}，点击撤回` : recommendedCard ? `${ROW_NAMES[rowIndex]}空位 ${cardIndex + 1}，练习建议放 ${COLOR_NAMES[recommendedCard.color]}色 ${recommendedCard.number}` : `${ROW_NAMES[rowIndex]}空位 ${cardIndex + 1}`}
+                        aria-label={card
+                          ? `${ROW_NAMES[rowIndex]} ${COLOR_NAMES[card.color]}色 ${card.number}，点击撤回`
+                          : placementForecast
+                            ? `${ROW_NAMES[rowIndex]}空位 ${cardIndex + 1}，放入所选牌后期望 ${placementForecast.expectedScore.toFixed(1)} 分，不炸率 ${(placementForecast.validRate * 100).toFixed(0)}%`
+                            : recommendedCard
+                              ? `${ROW_NAMES[rowIndex]}空位 ${cardIndex + 1}，练习建议放 ${COLOR_NAMES[recommendedCard.color]}色 ${recommendedCard.number}`
+                              : `${ROW_NAMES[rowIndex]}空位 ${cardIndex + 1}`}
                       >
-                        {card ? <CardFace card={card} /> : recommendedCard ? (
+                        {card ? <CardFace card={card} /> : selectedCardId && analyzingPositions ? (
+                          <span className="position-forecast-loading"><i />计算此位</span>
+                        ) : placementForecast ? (
+                          <span className={`position-forecast color-${selectedPracticeCard?.color ?? 0}`}>
+                            <b>{placementForecast.expectedScore.toFixed(1)}</b>
+                            <small>分期望</small>
+                            <em>{(placementForecast.validRate * 100).toFixed(0)}% 不炸</em>
+                            {placementForecast.bestForCard && <i>最佳位</i>}
+                          </span>
+                        ) : recommendedCard ? (
                           <span className={`recommendation-ghost color-${recommendedCard.color}`}><b>{recommendedCard.number}</b><small>推荐 · {COLOR_NAMES[recommendedCard.color]}</small></span>
                         ) : <span className="slot-plus">+</span>}
                         {recommendationMatched && <span className="match-badge">最优位</span>}
@@ -384,9 +429,9 @@ export default function Home() {
             <span className="player-token">你</span>
             {practiceMode ? (
               <div className="practice-summary" aria-live="polite">
-                <strong>{analyzingPractice ? '正在推演最优解…' : selectedPracticeCard && selectedPracticeValue ? `${COLOR_NAMES[selectedPracticeCard.color]} ${selectedPracticeCard.number} · 选牌分析` : '本轮模拟最优'}</strong>
-                {analyzingPractice ? <small>比较各种摆法与后续发牌</small> : selectedPracticeValue ? (
-                  <small><b>{selectedPracticeValue.playExpected.toFixed(1)}</b> 分期望 · {selectedPracticeValue.delta >= 0 ? `比弃置高 ${selectedPracticeValue.delta.toFixed(1)}` : `弃置更高 ${Math.abs(selectedPracticeValue.delta).toFixed(1)}`}</small>
+                <strong>{analyzingPositions && selectedPracticeCard ? `${COLOR_NAMES[selectedPracticeCard.color]} ${selectedPracticeCard.number} · 正在比较空位…` : analyzingPractice ? '正在推演最优解…' : selectedPracticeCard && selectedPracticeValue ? `${COLOR_NAMES[selectedPracticeCard.color]} ${selectedPracticeCard.number} · 逐位置分析` : '本轮模拟最优'}</strong>
+                {analyzingPositions ? <small>根据场上已有牌重算得分期望与不炸率</small> : analyzingPractice ? <small>比较各种摆法与后续发牌</small> : selectedPracticeValue ? (
+                  <small><b>{selectedPracticeValue.playExpected.toFixed(1)}</b> 分期望 · 空位上已显示逐位置结果</small>
                 ) : practiceAnalysis ? <small><b>{practiceAnalysis.expectedScore.toFixed(1)}</b> 分 · {practiceAnalysis.approximate ? `${practiceAnalysis.samples} 组后续发牌模拟` : '最终波精确计算'}</small> : <small>准备分析当前牌阵</small>}
                 {practiceAnalysis && <button className="report-link" type="button" onClick={() => setPracticeReportOpen(true)}>查看本手完整报告 →</button>}
               </div>
@@ -557,7 +602,7 @@ export default function Home() {
               </article>
               <article>
                 <h3>公开信息与练习</h3>
-                <p>每一波结束后，五位对手刚摆下的牌都会公开。练习模式每次发牌后会自动生成报告，比较所有弃牌方案、成牌路线与炸牌风险；点击手牌仍可单独查看得分期望。</p>
+                <p>每一波结束后，五位对手刚摆下的牌都会公开。练习模式每次发牌后会自动生成完整报告；点击任意手牌，牌阵上的每个可用空位会显示强制落位后的得分期望与不炸率。</p>
                 <p className="fine-print">前两波为多组随机后续发牌的模拟期望；第三波因没有未知发牌，为精确最优解。</p>
               </article>
             </div>
