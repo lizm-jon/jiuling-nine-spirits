@@ -28,9 +28,9 @@ const DEAL_COUNTS = [4, 4, 3];
 const PLACE_COUNTS = [3, 3, 2];
 const ROW_HINTS = ['高牌 / 对子', '完整三张牌型', '牌力需最强'];
 
-function CardFace({ card, compact = false }: { card: Card; compact?: boolean }) {
+function CardFace({ card, compact = false, highlighted = false }: { card: Card; compact?: boolean; highlighted?: boolean }) {
   return (
-    <span className={`card-face color-${card.color} ${compact ? 'is-compact' : ''}`}>
+    <span className={`card-face color-${card.color} ${compact ? 'is-compact' : ''} ${highlighted ? 'is-report-new' : ''}`}>
       <span className="corner">{card.number}<i>{COLOR_NAMES[card.color]}</i></span>
       <strong>{card.number}</strong>
       <span className="color-name">{COLOR_NAMES[card.color]}灵</span>
@@ -38,13 +38,13 @@ function CardFace({ card, compact = false }: { card: Card; compact?: boolean }) 
   );
 }
 
-function MiniBoard({ board }: { board: Board }) {
+function MiniBoard({ board, highlightedIds = [] }: { board: Board; highlightedIds?: string[] }) {
   return (
     <div className="mini-board" aria-hidden="true">
       {board.map((row, rowIndex) => (
         <div className="mini-row" key={rowIndex}>
           {row.map((card, cardIndex) => (
-            card ? <CardFace card={card} compact key={card.id} /> : <span className="mini-empty" key={cardIndex} />
+            card ? <CardFace card={card} compact highlighted={highlightedIds.includes(card.id)} key={card.id} /> : <span className="mini-empty" key={cardIndex} />
           ))}
         </div>
       ))}
@@ -85,6 +85,7 @@ export default function Home() {
   const [waveStartBoard, setWaveStartBoard] = useState<Board>(createEmptyBoard);
   const [discardedIds, setDiscardedIds] = useState<string[]>([]);
   const [opponentPreview, setOpponentPreview] = useState<number | null>(null);
+  const [practiceReportOpen, setPracticeReportOpen] = useState(false);
 
   const playerBoard = boards[0];
   const placeTarget = PLACE_COUNTS[wave];
@@ -115,7 +116,9 @@ export default function Home() {
     const timer = window.setTimeout(() => {
       const knownIds = new Set<string>(practiceKnownKey ? practiceKnownKey.split('|') : []);
       const unseenPool = createFullDeck().filter((card) => !knownIds.has(card.id));
-      setPracticeAnalysis(analyzePracticeMove(waveStartBoard, hand, unseenPool, wave));
+      const analysis = analyzePracticeMove(waveStartBoard, hand, unseenPool, wave);
+      setPracticeAnalysis(analysis);
+      setPracticeReportOpen(true);
     }, 60);
     return () => window.clearTimeout(timer);
   }, [hand, practiceKnownKey, practiceMode, processing, results, started, wave, waveStartBoard]);
@@ -140,6 +143,7 @@ export default function Home() {
     setWaveStartBoard(createEmptyBoard());
     setDiscardedIds([]);
     setOpponentPreview(null);
+    setPracticeReportOpen(false);
   }
 
   function selectHandCard(card: Card) {
@@ -178,6 +182,7 @@ export default function Home() {
   function confirmPlacement() {
     if (!readyToConfirm) return;
     setProcessing(true);
+    setPracticeReportOpen(false);
     const currentBoards = boards.map(cloneBoard);
     const currentAiHands = aiHands.map((cards) => [...cards]);
     const currentWave = wave;
@@ -214,6 +219,22 @@ export default function Home() {
     }, 560);
   }
 
+  function applyPracticeRecommendation() {
+    if (!practiceAnalysis) return;
+    const nextBoards = [...boards];
+    nextBoards[0] = cloneBoard(practiceAnalysis.recommendation);
+    const previousIds = new Set(waveStartBoard.flat().filter((card): card is Card => card !== null).map((card) => card.id));
+    const recommendedIds = practiceAnalysis.recommendation
+      .flat()
+      .filter((card): card is Card => Boolean(card && !previousIds.has(card.id)))
+      .map((card) => card.id);
+    setBoards(nextBoards);
+    setPlacedIds(recommendedIds);
+    setSelectedCardId(null);
+    setAnalysisCardId(practiceAnalysis.report.discarded?.id ?? null);
+    setPracticeReportOpen(false);
+  }
+
   const ranking = useMemo(() => {
     if (!results) return [];
     return results
@@ -225,6 +246,11 @@ export default function Home() {
   const selectedPracticeCard = analysisCardId ? hand.find((card) => card.id === analysisCardId) ?? null : null;
   const selectedPracticeValue = selectedPracticeCard && practiceAnalysis ? practiceAnalysis.cards[selectedPracticeCard.id] : null;
   const publicOpponentCards = opponentPreview ? boards[opponentPreview].flat().filter(Boolean).length : 0;
+  const totalPublicOpponentCards = boards.slice(1).flat(2).filter(Boolean).length;
+  const recommendedPracticeIds = practiceAnalysis?.recommendation
+    .flat()
+    .filter((card): card is Card => Boolean(card && !waveStartBoard.flat().some((previousCard) => previousCard?.id === card.id)))
+    .map((card) => card.id) ?? [];
   const winnerText = results
     ? results[0].total === Math.max(...results.map((result) => result.total))
       ? results.filter((result) => result.total === results[0].total).length > 1 ? '并列第一' : '你赢了'
@@ -240,8 +266,8 @@ export default function Home() {
         </button>
         <div className="top-actions">
           <div className="mode-switch" role="group" aria-label="游戏模式">
-            <button type="button" aria-pressed={!practiceMode} onClick={() => { setPracticeAnalysis(null); setPracticeMode(false); }}>普通</button>
-            <button type="button" aria-pressed={practiceMode} onClick={() => { setPracticeAnalysis(null); setPracticeMode(true); }}>练习</button>
+            <button type="button" aria-pressed={!practiceMode} onClick={() => { setPracticeAnalysis(null); setPracticeReportOpen(false); setPracticeMode(false); }}>普通</button>
+            <button type="button" aria-pressed={practiceMode} onClick={() => { setPracticeAnalysis(null); setPracticeReportOpen(false); setPracticeMode(true); }}>练习</button>
           </div>
           <button className="text-button" type="button" onClick={() => setRulesOpen(true)}>玩法规则</button>
           <button className="new-game-button" type="button" onClick={() => startGame(practiceMode)} disabled={processing}>
@@ -362,6 +388,7 @@ export default function Home() {
                 {analyzingPractice ? <small>比较各种摆法与后续发牌</small> : selectedPracticeValue ? (
                   <small><b>{selectedPracticeValue.playExpected.toFixed(1)}</b> 分期望 · {selectedPracticeValue.delta >= 0 ? `比弃置高 ${selectedPracticeValue.delta.toFixed(1)}` : `弃置更高 ${Math.abs(selectedPracticeValue.delta).toFixed(1)}`}</small>
                 ) : practiceAnalysis ? <small><b>{practiceAnalysis.expectedScore.toFixed(1)}</b> 分 · {practiceAnalysis.approximate ? `${practiceAnalysis.samples} 组后续发牌模拟` : '最终波精确计算'}</small> : <small>准备分析当前牌阵</small>}
+                {practiceAnalysis && <button className="report-link" type="button" onClick={() => setPracticeReportOpen(true)}>查看本手完整报告 →</button>}
               </div>
             ) : (
               <div>
@@ -394,6 +421,91 @@ export default function Home() {
             {processing ? '推演中…' : wave === 2 ? '完成牌阵' : '确认摆牌'}
           </button>
         </section>
+      )}
+
+      {practiceReportOpen && practiceAnalysis && practiceMode && started && !results && (
+        <div className="modal-backdrop report-backdrop" role="presentation" onMouseDown={() => setPracticeReportOpen(false)}>
+          <section className="practice-report-modal" role="dialog" aria-modal="true" aria-labelledby="practice-report-title" onMouseDown={(event) => event.stopPropagation()}>
+            <div className="modal-header report-header">
+              <div>
+                <p className="eyebrow">{WAVE_NAMES[wave]} · 发牌完成</p>
+                <h2 id="practice-report-title">这一手为什么这样摆</h2>
+                <p>已比较每一种弃牌选择，并用当前可见信息推演最终牌阵。</p>
+              </div>
+              <button className="close-button" type="button" onClick={() => setPracticeReportOpen(false)} aria-label="关闭本手分析报告">×</button>
+            </div>
+
+            <div className="report-metrics">
+              <div><span>最优期望</span><strong>{practiceAnalysis.expectedScore.toFixed(1)}</strong><small>最终得分</small></div>
+              <div><span>不炸牌率</span><strong>{(practiceAnalysis.report.validRate * 100).toFixed(0)}%</strong><small>最优路线</small></div>
+              <div><span>计算范围</span><strong>{practiceAnalysis.approximate ? practiceAnalysis.samples : '精确'}</strong><small>{practiceAnalysis.approximate ? '组未知发牌' : '全部落位'}</small></div>
+              <div><span>公开信息</span><strong>{totalPublicOpponentCards}</strong><small>张对手牌</small></div>
+            </div>
+
+            <div className="report-decision-grid">
+              <article className="recommended-layout">
+                <div className="report-section-heading">
+                  <div><p className="eyebrow">推荐结论</p><h3>最优落位</h3></div>
+                  {practiceAnalysis.report.discarded && <span className="discard-summary">弃 {COLOR_NAMES[practiceAnalysis.report.discarded.color]} {practiceAnalysis.report.discarded.number}</span>}
+                </div>
+                <MiniBoard board={practiceAnalysis.recommendation} highlightedIds={recommendedPracticeIds} />
+                <p>金色描边是本手推荐牌，虚线空位留给后续波次。当前未知牌池共 {practiceAnalysis.report.unseenCount} 张。</p>
+              </article>
+
+              <article className="reason-card">
+                <p className="eyebrow">决策解释</p>
+                <h3>为什么它是最优解</h3>
+                <ol>
+                  {practiceAnalysis.report.reasons.map((reason, index) => <li key={`${index}-${reason}`}>{reason}</li>)}
+                </ol>
+              </article>
+            </div>
+
+            <section className="outcome-section">
+              <div className="report-section-heading">
+                <div><p className="eyebrow">成牌路线</p><h3>最终可能形成什么牌</h3></div>
+                <small>{practiceAnalysis.approximate ? '百分比来自未知后续发牌模拟' : '第三波为当前牌面的确定结果'}</small>
+              </div>
+              <div className="outcome-grid">
+                {practiceAnalysis.report.rowOutcomes.map((outcomes, rowIndex) => (
+                  <div className="outcome-card" key={ROW_NAMES[rowIndex]}>
+                    <strong>{ROW_NAMES[rowIndex]}</strong>
+                    <div>{outcomes.map((outcome) => <span key={outcome.label}>{outcome.label}<b>{(outcome.probability * 100).toFixed(0)}%</b></span>)}</div>
+                  </div>
+                ))}
+                <div className="outcome-card special-outcomes">
+                  <strong>特殊牌型</strong>
+                  <div>{practiceAnalysis.report.specialOutcomes.map((outcome) => <span key={outcome.label}>{outcome.label}<b>{(outcome.probability * 100).toFixed(0)}%</b></span>)}</div>
+                </div>
+              </div>
+            </section>
+
+            <section className="discard-comparison">
+              <div className="report-section-heading">
+                <div><p className="eyebrow">完整比较</p><h3>分别弃掉每张牌，会怎样</h3></div>
+                <small>每一行都取该弃牌选择下的最佳落位</small>
+              </div>
+              <div className="discard-option-list">
+                {practiceAnalysis.report.discardOptions.map((option) => {
+                  const isRecommendedDiscard = option.card.id === practiceAnalysis.report.discarded?.id;
+                  return (
+                    <div className={`discard-option ${isRecommendedDiscard ? 'is-best' : ''}`} key={option.card.id}>
+                      <span className={`discard-card color-${option.card.color}`}><b>{option.card.number}</b><small>{COLOR_NAMES[option.card.color]}灵</small></span>
+                      <span className="discard-option-copy"><strong>{isRecommendedDiscard ? '推荐弃牌' : `弃掉 ${COLOR_NAMES[option.card.color]} ${option.card.number}`}</strong><small>{option.gap < 0.05 ? '当前最优' : `比最优少 ${option.gap.toFixed(1)} 分`}</small></span>
+                      <TinyBoard board={option.recommendation} />
+                      <b className="option-score">{option.expectedScore.toFixed(1)}<small>分期望</small></b>
+                    </div>
+                  );
+                })}
+              </div>
+            </section>
+
+            <div className="report-actions">
+              <button className="text-button" type="button" onClick={() => setPracticeReportOpen(false)}>自己尝试</button>
+              <button className="primary-button apply-recommendation" type="button" onClick={applyPracticeRecommendation}>按最优解摆放</button>
+            </div>
+          </section>
+        </div>
       )}
 
       {opponentPreview && started && wave > 0 && !results && (
@@ -445,7 +557,7 @@ export default function Home() {
               </article>
               <article>
                 <h3>公开信息与练习</h3>
-                <p>每一波结束后，五位对手刚摆下的牌都会公开。练习模式会模拟未知后续发牌，显示推荐落位；点击手牌可比较“选择”与“弃置”的最终得分期望。</p>
+                <p>每一波结束后，五位对手刚摆下的牌都会公开。练习模式每次发牌后会自动生成报告，比较所有弃牌方案、成牌路线与炸牌风险；点击手牌仍可单独查看得分期望。</p>
                 <p className="fine-print">前两波为多组随机后续发牌的模拟期望；第三波因没有未知发牌，为精确最优解。</p>
               </article>
             </div>

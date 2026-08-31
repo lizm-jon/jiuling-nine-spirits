@@ -41,12 +41,35 @@ export type PracticeCardValue = {
   target: { row: number; column: number } | null;
 };
 
+export type PracticeOutcome = {
+  label: string;
+  probability: number;
+};
+
+export type PracticeDiscardOption = {
+  card: Card;
+  expectedScore: number;
+  gap: number;
+  recommendation: Board;
+};
+
+export type PracticeReport = {
+  discarded: Card | null;
+  reasons: string[];
+  discardOptions: PracticeDiscardOption[];
+  rowOutcomes: PracticeOutcome[][];
+  specialOutcomes: PracticeOutcome[];
+  validRate: number;
+  unseenCount: number;
+};
+
 export type PracticeAnalysis = {
   recommendation: Board;
   expectedScore: number;
   samples: number;
   approximate: boolean;
   cards: Record<string, PracticeCardValue>;
+  report: PracticeReport;
 };
 
 export function createEmptyBoard(): Board {
@@ -315,19 +338,19 @@ function bestHeuristicBoard(board: Board, hand: Card[], placeCount: number): Boa
   return options.reduce((best, option) => option.heuristic > best.heuristic ? option : best).board;
 }
 
-function bestFinalScore(board: Board, hand: Card[], placeCount: number): number {
+function bestFinalOption(board: Board, hand: Card[], placeCount: number): PlacementOption {
   const options = placementOptions(board, hand, placeCount);
-  let bestScore = Number.NEGATIVE_INFINITY;
-  let bestTieBreak = Number.NEGATIVE_INFINITY;
-  options.forEach((option) => {
+  return options.reduce((best, option) => {
     const result = evaluateBoard(option.board);
     const tieBreak = result.baseScore * 100 + option.heuristic;
-    if (result.total > bestScore || (result.total === bestScore && tieBreak > bestTieBreak)) {
-      bestScore = result.total;
-      bestTieBreak = tieBreak;
-    }
+    const bestResult = evaluateBoard(best.board);
+    const bestTieBreak = bestResult.baseScore * 100 + best.heuristic;
+    return result.total > bestResult.total || (result.total === bestResult.total && tieBreak > bestTieBreak) ? option : best;
   });
-  return bestScore;
+}
+
+function bestFinalScore(board: Board, hand: Card[], placeCount: number): number {
+  return evaluateBoard(bestFinalOption(board, hand, placeCount).board).total;
 }
 
 function makeSeed(board: Board, hand: Card[], waveIndex: number): number {
@@ -370,6 +393,81 @@ function uniqueShortlist(options: PlacementOption[], hand: Card[]): PlacementOpt
   return [...chosen];
 }
 
+const TYPE_LABELS: Record<HandStrength['type'], string> = {
+  high: '高牌',
+  pair: '对子',
+  straight: '顺子',
+  trips: '三条',
+  flush: '同色',
+  straightFlush: '同色顺',
+};
+
+function outcomeDistribution(labels: string[]): PracticeOutcome[] {
+  const counts = new Map<string, number>();
+  labels.forEach((label) => counts.set(label, (counts.get(label) ?? 0) + 1));
+  return [...counts.entries()]
+    .map(([label, count]) => ({ label, probability: count / labels.length }))
+    .sort((left, right) => right.probability - left.probability || left.label.localeCompare(right.label, 'zh-CN'));
+}
+
+function cardName(card: Card): string {
+  return `${COLOR_NAMES[card.color]} ${card.number}`;
+}
+
+function rowPlanReason(before: Board, after: Board, rowIndex: number): string | null {
+  const newCards = after[rowIndex].filter((card): card is Card => Boolean(card && !before[rowIndex].some((oldCard) => oldCard?.id === card.id)));
+  if (!newCards.length) return null;
+  const cards = after[rowIndex].filter((card): card is Card => card !== null);
+  const placedText = newCards.map(cardName).join('、');
+  if (cards.length === after[rowIndex].length) {
+    const strength = classify(cards, rowIndex === 0);
+    return `${ROW_NAMES[rowIndex]}放 ${placedText}，立即组成${strength.label}；牌力为这一行后续排序提供确定基础。`;
+  }
+
+  const sameColor = cards.length > 1 && cards.every((card) => card.color === cards[0].color);
+  const numberCounts = new Map<number, number>();
+  cards.forEach((card) => numberCounts.set(card.number, (numberCounts.get(card.number) ?? 0) + 1));
+  const hasPair = [...numberCounts.values()].some((count) => count >= 2);
+  const numbers = cards.map((card) => card.number);
+  const connected = numbers.some((number) => numbers.includes(number + 1) || numbers.includes(number + 2));
+  const routes = [hasPair && '对子/三条', sameColor && '同色', connected && '顺子'].filter(Boolean);
+  return `${ROW_NAMES[rowIndex]}先放 ${placedText}${routes.length ? `，同时保留${routes.join('、')}路线` : '，为后续补牌保留较宽的数字与颜色空间'}。`;
+}
+
+function buildPracticeReasons(
+  board: Board,
+  hand: Card[],
+  bestOption: PlacementOption,
+  discardOptions: PracticeDiscardOption[],
+  validRate: number,
+  rowOutcomes: PracticeOutcome[][],
+): string[] {
+  const discarded = hand.find((card) => !bestOption.usedIds.has(card.id)) ?? null;
+  const reasons: string[] = [];
+  const runnerUp = [...discardOptions].sort((left, right) => right.expectedScore - left.expectedScore)[1];
+  if (discarded) {
+    const bestDiscard = discardOptions.find((option) => option.card.id === discarded.id);
+    const edge = bestDiscard && runnerUp ? bestDiscard.expectedScore - runnerUp.expectedScore : 0;
+    reasons.push(edge > 0.04
+      ? `弃掉 ${cardName(discarded)} 后的最优路线，比次优弃牌方案多 ${edge.toFixed(1)} 分期望。`
+      : `弃掉 ${cardName(discarded)} 与次优选择非常接近；当前落位在牌序稳定性与后续成牌空间上胜出。`);
+  }
+  for (let rowIndex = 0; rowIndex < bestOption.board.length; rowIndex += 1) {
+    const reason = rowPlanReason(board, bestOption.board, rowIndex);
+    if (reason) reasons.push(reason);
+    if (reasons.length >= 4) break;
+  }
+  const strongestFuture = rowOutcomes
+    .flatMap((outcomes, rowIndex) => outcomes.map((outcome) => ({ ...outcome, rowIndex })))
+    .filter((outcome) => outcome.label !== '高牌')
+    .sort((left, right) => right.probability - left.probability)[0];
+  if (strongestFuture) reasons.push(`按这条路线继续，${ROW_NAMES[strongestFuture.rowIndex]}最常见的计分成牌是${strongestFuture.label}（推演占比 ${(strongestFuture.probability * 100).toFixed(0)}%）。`);
+  reasons.push(validRate >= 0.995
+    ? '所有推演结果都保持下行 ≥ 中行 ≥ 上行，没有出现炸牌。'
+    : `推演中有 ${(validRate * 100).toFixed(0)}% 的结果不炸牌，推荐落位优先控制了整局归零风险。`);
+  return reasons;
+}
+
 export function analyzePracticeMove(
   board: Board,
   hand: Card[],
@@ -406,6 +504,22 @@ export function analyzePracticeMove(
   const bestOption = evaluatedOptions.reduce((best, option) => (
     (values.get(option) ?? Number.NEGATIVE_INFINITY) > (values.get(best) ?? Number.NEGATIVE_INFINITY) ? option : best
   ));
+  const bestExpected = values.get(bestOption) ?? 0;
+  const discarded = hand.find((card) => !bestOption.usedIds.has(card.id)) ?? null;
+  const discardOptions: PracticeDiscardOption[] = hand.map((card) => {
+    const candidates = evaluatedOptions.filter((option) => !option.usedIds.has(card.id));
+    const bestDiscardOption = candidates.reduce((best, option) => (
+      (values.get(option) ?? Number.NEGATIVE_INFINITY) > (values.get(best) ?? Number.NEGATIVE_INFINITY) ? option : best
+    ));
+    const expectedScore = values.get(bestDiscardOption) ?? 0;
+    return {
+      card,
+      expectedScore,
+      gap: bestExpected - expectedScore,
+      recommendation: bestDiscardOption.board,
+    };
+  }).sort((left, right) => right.expectedScore - left.expectedScore
+    || Number(right.card.id === discarded?.id) - Number(left.card.id === discarded?.id));
   const cards: Record<string, PracticeCardValue> = {};
   hand.forEach((card) => {
     const playing = evaluatedOptions.filter((option) => option.usedIds.has(card.id));
@@ -427,12 +541,33 @@ export function analyzePracticeMove(
     };
   });
 
+  const finalBoards = waveIndex === 2 ? [bestOption.board] : rollouts.map((rollout) => {
+    if (waveIndex === 1) return bestFinalOption(bestOption.board, rollout, 2).board;
+    const secondBoard = bestHeuristicBoard(bestOption.board, rollout.slice(0, 4), 3);
+    return bestFinalOption(secondBoard, rollout.slice(4, 7), 2).board;
+  });
+  const finalResults = finalBoards.map(evaluateBoard);
+  const rowOutcomes = ROW_NAMES.map((_, rowIndex) => outcomeDistribution(
+    finalResults.map((result) => TYPE_LABELS[result.rows[rowIndex].type]),
+  ));
+  const specialOutcomes = outcomeDistribution(finalResults.map((result) => result.topSpecial?.name ?? '无特殊牌型'));
+  const validRate = finalResults.filter((result) => !result.bust).length / finalResults.length;
+
   return {
     recommendation: bestOption.board,
-    expectedScore: values.get(bestOption) ?? 0,
+    expectedScore: bestExpected,
     samples: sampleCount,
     approximate: waveIndex < 2,
     cards,
+    report: {
+      discarded,
+      reasons: buildPracticeReasons(board, hand, bestOption, discardOptions, validRate, rowOutcomes),
+      discardOptions,
+      rowOutcomes,
+      specialOutcomes,
+      validRate,
+      unseenCount: unseenPool.length,
+    },
   };
 }
 
