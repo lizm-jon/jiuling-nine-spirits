@@ -1,19 +1,22 @@
 'use client';
 
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   Board,
   BoardResult,
   Card,
   COLOR_NAMES,
+  PracticeAnalysis,
   ROW_NAMES,
   ROW_SIZES,
+  analyzePracticeMove,
   chooseAiBoard,
   classify,
   cloneBoard,
   compareStrength,
   createDeck,
   createEmptyBoard,
+  createFullDeck,
   dealWave,
   evaluateBoard,
 } from '../lib/game';
@@ -49,6 +52,20 @@ function MiniBoard({ board }: { board: Board }) {
   );
 }
 
+function TinyBoard({ board }: { board: Board }) {
+  return (
+    <span className="tiny-board" aria-hidden="true">
+      {board.map((row, rowIndex) => (
+        <span className="tiny-row" key={rowIndex}>
+          {row.map((card, cardIndex) => (
+            <i className={card ? `color-${card.color}` : ''} key={card?.id ?? cardIndex}>{card?.number ?? ''}</i>
+          ))}
+        </span>
+      ))}
+    </span>
+  );
+}
+
 export default function Home() {
   const [started, setStarted] = useState(false);
   const [wave, setWave] = useState(0);
@@ -62,6 +79,12 @@ export default function Home() {
   const [rulesOpen, setRulesOpen] = useState(false);
   const [results, setResults] = useState<BoardResult[] | null>(null);
   const [inspectedPlayer, setInspectedPlayer] = useState(0);
+  const [practiceMode, setPracticeMode] = useState(false);
+  const [practiceAnalysis, setPracticeAnalysis] = useState<PracticeAnalysis | null>(null);
+  const [analysisCardId, setAnalysisCardId] = useState<string | null>(null);
+  const [waveStartBoard, setWaveStartBoard] = useState<Board>(createEmptyBoard);
+  const [discardedIds, setDiscardedIds] = useState<string[]>([]);
+  const [opponentPreview, setOpponentPreview] = useState<number | null>(null);
 
   const playerBoard = boards[0];
   const placeTarget = PLACE_COUNTS[wave];
@@ -79,8 +102,25 @@ export default function Home() {
   );
 
   const visibleHand = hand.filter((card) => !placedIds.includes(card.id));
+  const analyzingPractice = practiceMode && started && !processing && !results && hand.length > 0 && practiceAnalysis === null;
+  const practiceKnownKey = useMemo(() => [
+    ...waveStartBoard.flat().filter((card): card is Card => card !== null).map((card) => card.id),
+    ...boards.slice(1).flat(2).filter((card): card is Card => card !== null).map((card) => card.id),
+    ...hand.map((card) => card.id),
+    ...discardedIds,
+  ].sort().join('|'), [boards, discardedIds, hand, waveStartBoard]);
 
-  function startGame() {
+  useEffect(() => {
+    if (!practiceMode || !started || processing || results || !hand.length) return;
+    const timer = window.setTimeout(() => {
+      const knownIds = new Set<string>(practiceKnownKey ? practiceKnownKey.split('|') : []);
+      const unseenPool = createFullDeck().filter((card) => !knownIds.has(card.id));
+      setPracticeAnalysis(analyzePracticeMove(waveStartBoard, hand, unseenPool, wave));
+    }, 60);
+    return () => window.clearTimeout(timer);
+  }, [hand, practiceKnownKey, practiceMode, processing, results, started, wave, waveStartBoard]);
+
+  function startGame(mode = practiceMode) {
     const freshBoards = Array.from({ length: 6 }, createEmptyBoard);
     const dealt = dealWave(createDeck(), DEAL_COUNTS[0]);
     setStarted(true);
@@ -94,10 +134,17 @@ export default function Home() {
     setProcessing(false);
     setResults(null);
     setInspectedPlayer(0);
+    setPracticeMode(mode);
+    setPracticeAnalysis(null);
+    setAnalysisCardId(null);
+    setWaveStartBoard(createEmptyBoard());
+    setDiscardedIds([]);
+    setOpponentPreview(null);
   }
 
   function selectHandCard(card: Card) {
     if (processing) return;
+    if (practiceMode) setAnalysisCardId(card.id);
     setSelectedCardId((current) => current === card.id ? null : card.id);
   }
 
@@ -113,6 +160,7 @@ export default function Home() {
       setBoards(nextBoards);
       setPlacedIds((current) => current.filter((id) => id !== existing.id));
       setSelectedCardId(existing.id);
+      if (practiceMode) setAnalysisCardId(existing.id);
       return;
     }
     if (!selectedCardId || placedCount >= placeTarget) return;
@@ -134,6 +182,8 @@ export default function Home() {
     const currentAiHands = aiHands.map((cards) => [...cards]);
     const currentWave = wave;
     const currentDeck = [...deck];
+    const discardedThisWave = hand.filter((card) => !placedIds.includes(card.id)).map((card) => card.id);
+    setDiscardedIds((current) => [...current, ...discardedThisWave]);
 
     window.setTimeout(() => {
       for (let aiIndex = 0; aiIndex < 5; aiIndex += 1) {
@@ -152,11 +202,14 @@ export default function Home() {
       const dealt = dealWave(currentDeck, DEAL_COUNTS[nextWave]);
       setBoards(currentBoards);
       setWave(nextWave);
+      setWaveStartBoard(cloneBoard(currentBoards[0]));
       setDeck(dealt.deck);
       setHand(dealt.hands[0]);
       setAiHands(dealt.hands.slice(1));
       setPlacedIds([]);
       setSelectedCardId(null);
+      setPracticeAnalysis(null);
+      setAnalysisCardId(null);
       setProcessing(false);
     }, 560);
   }
@@ -169,6 +222,9 @@ export default function Home() {
   }, [results]);
 
   const selectedResult = results?.[inspectedPlayer] ?? null;
+  const selectedPracticeCard = analysisCardId ? hand.find((card) => card.id === analysisCardId) ?? null : null;
+  const selectedPracticeValue = selectedPracticeCard && practiceAnalysis ? practiceAnalysis.cards[selectedPracticeCard.id] : null;
+  const publicOpponentCards = opponentPreview ? boards[opponentPreview].flat().filter(Boolean).length : 0;
   const winnerText = results
     ? results[0].total === Math.max(...results.map((result) => result.total))
       ? results.filter((result) => result.total === results[0].total).length > 1 ? '并列第一' : '你赢了'
@@ -178,13 +234,17 @@ export default function Home() {
   return (
     <main className="game-shell">
       <header className="topbar">
-        <button className="brand" type="button" onClick={startGame} aria-label="开始一局新游戏">
+        <button className="brand" type="button" onClick={() => startGame(practiceMode)} aria-label="开始一局新游戏">
           <span className="brand-mark">九</span>
           <span><strong>九灵牌</strong><small>NINE SPIRITS</small></span>
         </button>
         <div className="top-actions">
+          <div className="mode-switch" role="group" aria-label="游戏模式">
+            <button type="button" aria-pressed={!practiceMode} onClick={() => { setPracticeAnalysis(null); setPracticeMode(false); }}>普通</button>
+            <button type="button" aria-pressed={practiceMode} onClick={() => { setPracticeAnalysis(null); setPracticeMode(true); }}>练习</button>
+          </div>
           <button className="text-button" type="button" onClick={() => setRulesOpen(true)}>玩法规则</button>
-          <button className="new-game-button" type="button" onClick={startGame} disabled={processing}>
+          <button className="new-game-button" type="button" onClick={() => startGame(practiceMode)} disabled={processing}>
             {started ? '重新开局' : '开始牌局'}
           </button>
         </div>
@@ -193,21 +253,28 @@ export default function Home() {
       <section className="table-wrap" aria-label="九灵牌牌桌">
         <aside className="opponents" aria-label="五位对手">
           {AI_NAMES.map((name, index) => (
-            <div className="opponent" key={name}>
+            <button
+              className="opponent"
+              key={name}
+              type="button"
+              onClick={() => setOpponentPreview(index + 1)}
+              disabled={!started || wave === 0 || processing}
+              aria-label={`${name}${wave > 0 ? `截至上一轮已公开 ${boards[index + 1].flat().filter(Boolean).length} 张，点击查看` : '尚无公开牌阵'}`}
+            >
               <span className={`avatar avatar-${index + 1}`}>{name[0]}</span>
               <span>
                 <strong>{name}</strong>
-                <small>{results ? `${results[index + 1].total} 分` : processing ? '推演牌阵中' : started ? `已完成 ${wave} 波` : '等待开局'}</small>
+                <small>{results ? `${results[index + 1].total} 分` : processing ? '推演牌阵中' : started && wave > 0 ? `公开 ${boards[index + 1].flat().filter(Boolean).length} 张` : started ? '等待第一波' : '等待开局'}</small>
               </span>
-              <i className={`ready-dot ${processing ? 'is-thinking' : ''}`} />
-            </div>
+              {started && wave > 0 ? <TinyBoard board={boards[index + 1]} /> : <i className={`ready-dot ${processing ? 'is-thinking' : ''}`} />}
+            </button>
           ))}
         </aside>
 
         <section className="play-area">
           <div className="round-heading">
             <div>
-              <p className="eyebrow">{started ? WAVE_NAMES[wave] : '六人牌局 · 三波成阵'}</p>
+              <p className="eyebrow">{started ? WAVE_NAMES[wave] : '六人牌局 · 三波成阵'}{practiceMode && <span className="practice-chip">练习模式</span>}</p>
               <h1>{started ? (processing ? '灵阵推演中…' : `选 ${placeTarget} 张，落入牌阵`) : '八张成阵，强弱有序'}</h1>
               <p>{started ? `点选手牌，再选择空位；本波会弃掉 ${DEAL_COUNTS[wave] - PLACE_COUNTS[wave]} 张。` : '把牌摆成上二、中三、下三；牌力必须逐行增强。'}</p>
             </div>
@@ -215,6 +282,12 @@ export default function Home() {
               <b>{started ? String(wave + 1).padStart(2, '0') : '—'}</b><span>/ 03</span>
             </div>
           </div>
+
+          {started && wave > 0 && !results && (
+            <button className="opponent-reveal-button" type="button" onClick={() => setOpponentPreview(1)}>
+              查看五家上一轮牌阵 <span>公开 {wave * 3} 张起</span>
+            </button>
+          )}
 
           <div className={`board-card ${liveBust ? 'has-warning' : ''}`}>
             <div className="board-glow" />
@@ -225,17 +298,26 @@ export default function Home() {
                   <span>{ROW_HINTS[rowIndex]}</span>
                 </div>
                 <div className={`slots slots-${size}`}>
-                  {playerBoard[rowIndex].map((card, cardIndex) => (
-                    <button
-                      className={`card-slot ${card ? 'is-filled' : ''} ${card && placedIds.includes(card.id) ? 'is-new' : ''} ${!card && selectedCardId ? 'is-target' : ''}`}
-                      type="button"
-                      key={card?.id ?? `${rowIndex}-${cardIndex}`}
-                      onClick={() => clickBoardSlot(rowIndex, cardIndex)}
-                      aria-label={card ? `${ROW_NAMES[rowIndex]} ${COLOR_NAMES[card.color]}色 ${card.number}，点击撤回` : `${ROW_NAMES[rowIndex]}空位 ${cardIndex + 1}`}
-                    >
-                      {card ? <CardFace card={card} /> : <span className="slot-plus">+</span>}
-                    </button>
-                  ))}
+                  {playerBoard[rowIndex].map((card, cardIndex) => {
+                    const recommendedCard = practiceAnalysis && !waveStartBoard[rowIndex][cardIndex]
+                      ? practiceAnalysis.recommendation[rowIndex][cardIndex]
+                      : null;
+                    const recommendationMatched = Boolean(card && recommendedCard?.id === card.id);
+                    return (
+                      <button
+                        className={`card-slot ${card ? 'is-filled' : ''} ${card && placedIds.includes(card.id) ? 'is-new' : ''} ${!card && selectedCardId ? 'is-target' : ''} ${recommendationMatched ? 'is-recommended-match' : ''}`}
+                        type="button"
+                        key={card?.id ?? `${rowIndex}-${cardIndex}`}
+                        onClick={() => clickBoardSlot(rowIndex, cardIndex)}
+                        aria-label={card ? `${ROW_NAMES[rowIndex]} ${COLOR_NAMES[card.color]}色 ${card.number}，点击撤回` : recommendedCard ? `${ROW_NAMES[rowIndex]}空位 ${cardIndex + 1}，练习建议放 ${COLOR_NAMES[recommendedCard.color]}色 ${recommendedCard.number}` : `${ROW_NAMES[rowIndex]}空位 ${cardIndex + 1}`}
+                      >
+                        {card ? <CardFace card={card} /> : recommendedCard ? (
+                          <span className={`recommendation-ghost color-${recommendedCard.color}`}><b>{recommendedCard.number}</b><small>推荐 · {COLOR_NAMES[recommendedCard.color]}</small></span>
+                        ) : <span className="slot-plus">+</span>}
+                        {recommendationMatched && <span className="match-badge">最优位</span>}
+                      </button>
+                    );
+                  })}
                 </div>
                 <span className={`row-score ${liveRows[rowIndex] ? 'is-scored' : ''}`}>
                   {liveRows[rowIndex] ? <><b>{liveRows[rowIndex]!.score}</b><small>{liveRows[rowIndex]!.label}</small></> : '—'}
@@ -248,7 +330,10 @@ export default function Home() {
                 <p className="eyebrow">一局约 3 分钟</p>
                 <h2>布下你的九灵牌阵</h2>
                 <p>三波发牌，逐步取舍。和五位 AI 一较高下。</p>
-                <button className="primary-button start-button" type="button" onClick={startGame}>开始一局</button>
+                <div className="start-actions">
+                  <button className="primary-button start-button" type="button" onClick={() => startGame(false)}>普通模式</button>
+                  <button className="practice-start-button" type="button" onClick={() => startGame(true)}><span>◇</span>练习模式 · 显示最优解</button>
+                </div>
               </div>
             )}
 
@@ -268,34 +353,76 @@ export default function Home() {
       </section>
 
       {started && !results && (
-        <section className="hand-dock" aria-label="你的手牌">
-          <div className="hand-copy">
+        <section className={`hand-dock ${practiceMode ? 'practice-dock' : ''}`} aria-label="你的手牌">
+          <div className={`hand-copy ${practiceMode ? 'practice-copy' : ''}`}>
             <span className="player-token">你</span>
-            <div>
-              <strong>你的手牌</strong>
-              <small>{readyToConfirm ? `将弃掉 ${visibleHand.length} 张` : `尚需放置 ${placeTarget - placedCount} 张`}</small>
-            </div>
+            {practiceMode ? (
+              <div className="practice-summary" aria-live="polite">
+                <strong>{analyzingPractice ? '正在推演最优解…' : selectedPracticeCard && selectedPracticeValue ? `${COLOR_NAMES[selectedPracticeCard.color]} ${selectedPracticeCard.number} · 选牌分析` : '本轮模拟最优'}</strong>
+                {analyzingPractice ? <small>比较各种摆法与后续发牌</small> : selectedPracticeValue ? (
+                  <small><b>{selectedPracticeValue.playExpected.toFixed(1)}</b> 分期望 · {selectedPracticeValue.delta >= 0 ? `比弃置高 ${selectedPracticeValue.delta.toFixed(1)}` : `弃置更高 ${Math.abs(selectedPracticeValue.delta).toFixed(1)}`}</small>
+                ) : practiceAnalysis ? <small><b>{practiceAnalysis.expectedScore.toFixed(1)}</b> 分 · {practiceAnalysis.approximate ? `${practiceAnalysis.samples} 组后续发牌模拟` : '最终波精确计算'}</small> : <small>准备分析当前牌阵</small>}
+              </div>
+            ) : (
+              <div>
+                <strong>你的手牌</strong>
+                <small>{readyToConfirm ? `将弃掉 ${visibleHand.length} 张` : `尚需放置 ${placeTarget - placedCount} 张`}</small>
+              </div>
+            )}
           </div>
           <div className="hand-cards">
-            {visibleHand.map((card) => (
-              <button
-                className={`playing-card ${selectedCardId === card.id ? 'is-selected' : ''} ${readyToConfirm ? 'will-discard' : ''}`}
-                type="button"
-                key={card.id}
-                onClick={() => selectHandCard(card)}
-                aria-pressed={selectedCardId === card.id}
-                aria-label={`${COLOR_NAMES[card.color]}色 ${card.number}${readyToConfirm ? '，确认后弃掉' : ''}`}
-              >
-                <CardFace card={card} />
-                {readyToConfirm && <span className="discard-tag">将弃</span>}
-              </button>
-            ))}
+            {visibleHand.map((card) => {
+              const cardAnalysis = practiceAnalysis?.cards[card.id];
+              return (
+                <button
+                  className={`playing-card ${selectedCardId === card.id ? 'is-selected' : ''} ${readyToConfirm ? 'will-discard' : ''} ${cardAnalysis?.recommended ? 'is-recommended' : ''}`}
+                  type="button"
+                  key={card.id}
+                  onClick={() => selectHandCard(card)}
+                  aria-pressed={selectedCardId === card.id}
+                  aria-label={`${COLOR_NAMES[card.color]}色 ${card.number}${cardAnalysis ? `，选择期望 ${cardAnalysis.playExpected.toFixed(1)} 分` : ''}${readyToConfirm ? '，确认后弃掉' : ''}`}
+                >
+                  <CardFace card={card} />
+                  {cardAnalysis && <span className={`analysis-badge ${cardAnalysis.recommended ? 'is-best' : ''}`}>{cardAnalysis.recommended ? '推荐' : '可弃'}</span>}
+                  {readyToConfirm && <span className="discard-tag">将弃</span>}
+                </button>
+              );
+            })}
             {!visibleHand.length && <span className="hand-empty">三张牌已落位</span>}
           </div>
           <button className="primary-button" type="button" disabled={!readyToConfirm} onClick={confirmPlacement}>
             {processing ? '推演中…' : wave === 2 ? '完成牌阵' : '确认摆牌'}
           </button>
         </section>
+      )}
+
+      {opponentPreview && started && wave > 0 && !results && (
+        <div className="modal-backdrop" role="presentation" onMouseDown={() => setOpponentPreview(null)}>
+          <section className="opponent-modal" role="dialog" aria-modal="true" aria-labelledby="opponent-title" onMouseDown={(event) => event.stopPropagation()}>
+            <div className="modal-header">
+              <div>
+                <p className="eyebrow">公开信息 · 上一轮结果</p>
+                <h2 id="opponent-title">五家牌阵</h2>
+              </div>
+              <button className="close-button" type="button" onClick={() => setOpponentPreview(null)} aria-label="关闭对手牌阵">×</button>
+            </div>
+            <div className="opponent-tabs" role="tablist" aria-label="选择对手">
+              {AI_NAMES.map((name, index) => (
+                <button className={opponentPreview === index + 1 ? 'is-active' : ''} type="button" role="tab" aria-selected={opponentPreview === index + 1} key={name} onClick={() => setOpponentPreview(index + 1)}>
+                  <span className={`avatar avatar-${index + 1}`}>{name[0]}</span>{name}
+                </button>
+              ))}
+            </div>
+            <div className="opponent-inspect">
+              <div>
+                <p className="eyebrow">{AI_NAMES[opponentPreview - 1]}</p>
+                <h3>截至上一轮已公开 {publicOpponentCards} / 8 张</h3>
+                <p>这些牌在本轮开始前已经公开，可用于判断剩余颜色、数字与对手牌力。</p>
+              </div>
+              <MiniBoard board={boards[opponentPreview]} />
+            </div>
+          </section>
+        </div>
       )}
 
       {rulesOpen && (
@@ -315,6 +442,11 @@ export default function Home() {
                 <h3>牌力与炸牌</h3>
                 <p>牌力顺序：高牌 ＜ 对子 ＜ 顺子 ＜ 三条 ＜ 同色 ＜ 同色顺。必须满足下行 ≥ 中行 ≥ 上行，否则基础分归零。</p>
                 <p className="fine-print">同牌型时：对子比对数；顺子比最大牌；同色与高牌从最大数字起依次比较。</p>
+              </article>
+              <article>
+                <h3>公开信息与练习</h3>
+                <p>每一波结束后，五位对手刚摆下的牌都会公开。练习模式会模拟未知后续发牌，显示推荐落位；点击手牌可比较“选择”与“弃置”的最终得分期望。</p>
+                <p className="fine-print">前两波为多组随机后续发牌的模拟期望；第三波因没有未知发牌，为精确最优解。</p>
               </article>
             </div>
             <h3 className="section-title">特殊牌型 · 无视炸牌，和基础分取最高</h3>
@@ -375,7 +507,7 @@ export default function Home() {
             </div>
             <div className="result-actions">
               <button className="text-button" type="button" onClick={() => setRulesOpen(true)}>回看规则</button>
-              <button className="primary-button play-again" type="button" onClick={startGame}>再来一局</button>
+              <button className="primary-button play-again" type="button" onClick={() => startGame(practiceMode)}>再来一局</button>
             </div>
           </section>
         </div>

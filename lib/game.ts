@@ -33,17 +33,38 @@ export type BoardResult = {
   topSpecial: Special | null;
 };
 
+export type PracticeCardValue = {
+  playExpected: number;
+  discardExpected: number;
+  delta: number;
+  recommended: boolean;
+  target: { row: number; column: number } | null;
+};
+
+export type PracticeAnalysis = {
+  recommendation: Board;
+  expectedScore: number;
+  samples: number;
+  approximate: boolean;
+  cards: Record<string, PracticeCardValue>;
+};
+
 export function createEmptyBoard(): Board {
   return ROW_SIZES.map((size) => Array<Card | null>(size).fill(null));
 }
 
-export function createDeck(): Card[] {
+export function createFullDeck(): Card[] {
   const deck: Card[] = [];
   for (let color = 0; color < COLOR_NAMES.length; color += 1) {
     for (let number = 1; number <= 9; number += 1) {
       deck.push({ id: `${color}-${number}`, number, color });
     }
   }
+  return deck;
+}
+
+export function createDeck(): Card[] {
+  const deck = createFullDeck();
   for (let index = deck.length - 1; index > 0; index -= 1) {
     const swapIndex = Math.floor(Math.random() * (index + 1));
     [deck[index], deck[swapIndex]] = [deck[swapIndex], deck[index]];
@@ -261,26 +282,170 @@ function partialBoardValue(board: Board): number {
   return score;
 }
 
-export function chooseAiBoard(board: Board, hand: Card[], placeCount: number): Board {
+type PlacementOption = {
+  board: Board;
+  usedIds: Set<string>;
+  heuristic: number;
+};
+
+function placementOptions(board: Board, hand: Card[], placeCount: number): PlacementOption[] {
   const emptySlots: Slot[] = [];
   board.forEach((row, rowIndex) => row.forEach((card, cardIndex) => {
     if (!card) emptySlots.push([rowIndex, cardIndex]);
   }));
   const slotGroups = combinations(emptySlots, placeCount);
   const cardOrders = permutations(hand, placeCount);
-  let bestBoard = cloneBoard(board);
-  let bestValue = Number.NEGATIVE_INFINITY;
-
+  const options: PlacementOption[] = [];
   slotGroups.forEach((slots) => {
     cardOrders.forEach((cards) => {
       const candidate = cloneBoard(board);
       slots.forEach(([row, column], index) => { candidate[row][column] = cards[index]; });
-      const value = partialBoardValue(candidate) + Math.random() * 0.08;
-      if (value > bestValue) {
-        bestValue = value;
-        bestBoard = candidate;
-      }
+      options.push({
+        board: candidate,
+        usedIds: new Set(cards.map((card) => card.id)),
+        heuristic: partialBoardValue(candidate),
+      });
     });
+  });
+  return options;
+}
+
+function bestHeuristicBoard(board: Board, hand: Card[], placeCount: number): Board {
+  const options = placementOptions(board, hand, placeCount);
+  return options.reduce((best, option) => option.heuristic > best.heuristic ? option : best).board;
+}
+
+function bestFinalScore(board: Board, hand: Card[], placeCount: number): number {
+  const options = placementOptions(board, hand, placeCount);
+  let bestScore = Number.NEGATIVE_INFINITY;
+  let bestTieBreak = Number.NEGATIVE_INFINITY;
+  options.forEach((option) => {
+    const result = evaluateBoard(option.board);
+    const tieBreak = result.baseScore * 100 + option.heuristic;
+    if (result.total > bestScore || (result.total === bestScore && tieBreak > bestTieBreak)) {
+      bestScore = result.total;
+      bestTieBreak = tieBreak;
+    }
+  });
+  return bestScore;
+}
+
+function makeSeed(board: Board, hand: Card[], waveIndex: number): number {
+  const text = `${waveIndex}|${board.flat().map((card) => card?.id ?? 'x').join(',')}|${hand.map((card) => card.id).sort().join(',')}`;
+  let seed = 2166136261;
+  for (let index = 0; index < text.length; index += 1) {
+    seed ^= text.charCodeAt(index);
+    seed = Math.imul(seed, 16777619);
+  }
+  return seed >>> 0 || 1;
+}
+
+function seededRandom(seed: number): () => number {
+  let state = seed >>> 0;
+  return () => {
+    state ^= state << 13;
+    state ^= state >>> 17;
+    state ^= state << 5;
+    return (state >>> 0) / 4294967296;
+  };
+}
+
+function sampleCards(pool: Card[], count: number, random: () => number): Card[] {
+  const copy = [...pool];
+  for (let index = 0; index < count; index += 1) {
+    const swapIndex = index + Math.floor(random() * (copy.length - index));
+    [copy[index], copy[swapIndex]] = [copy[swapIndex], copy[index]];
+  }
+  return copy.slice(0, count);
+}
+
+function uniqueShortlist(options: PlacementOption[], hand: Card[]): PlacementOption[] {
+  const ranked = [...options].sort((left, right) => right.heuristic - left.heuristic);
+  const chosen = new Set<PlacementOption>();
+  ranked.slice(0, 32).forEach((option) => chosen.add(option));
+  hand.forEach((card) => {
+    ranked.filter((option) => option.usedIds.has(card.id)).slice(0, 12).forEach((option) => chosen.add(option));
+    ranked.filter((option) => !option.usedIds.has(card.id)).slice(0, 12).forEach((option) => chosen.add(option));
+  });
+  return [...chosen];
+}
+
+export function analyzePracticeMove(
+  board: Board,
+  hand: Card[],
+  unseenPool: Card[],
+  waveIndex: number,
+): PracticeAnalysis {
+  const placeCount = [3, 3, 2][waveIndex];
+  const allOptions = placementOptions(board, hand, placeCount);
+  const evaluatedOptions = waveIndex === 0 ? uniqueShortlist(allOptions, hand) : allOptions;
+  const sampleCount = waveIndex === 0 ? 24 : waveIndex === 1 ? 40 : 1;
+  const random = seededRandom(makeSeed(board, hand, waveIndex));
+  const rollouts = Array.from({ length: sampleCount }, () => sampleCards(unseenPool, waveIndex === 0 ? 7 : waveIndex === 1 ? 3 : 0, random));
+  const values = new Map<PlacementOption, number>();
+
+  evaluatedOptions.forEach((option) => {
+    if (waveIndex === 2) {
+      values.set(option, evaluateBoard(option.board).total);
+      return;
+    }
+    let total = 0;
+    rollouts.forEach((rollout) => {
+      if (waveIndex === 1) {
+        total += bestFinalScore(option.board, rollout, 2);
+        return;
+      }
+      const secondHand = rollout.slice(0, 4);
+      const finalHand = rollout.slice(4, 7);
+      const secondBoard = bestHeuristicBoard(option.board, secondHand, 3);
+      total += bestFinalScore(secondBoard, finalHand, 2);
+    });
+    values.set(option, total / sampleCount);
+  });
+
+  const bestOption = evaluatedOptions.reduce((best, option) => (
+    (values.get(option) ?? Number.NEGATIVE_INFINITY) > (values.get(best) ?? Number.NEGATIVE_INFINITY) ? option : best
+  ));
+  const cards: Record<string, PracticeCardValue> = {};
+  hand.forEach((card) => {
+    const playing = evaluatedOptions.filter((option) => option.usedIds.has(card.id));
+    const discarding = evaluatedOptions.filter((option) => !option.usedIds.has(card.id));
+    const playExpected = Math.max(...playing.map((option) => values.get(option) ?? 0));
+    const discardExpected = discarding.length
+      ? Math.max(...discarding.map((option) => values.get(option) ?? 0))
+      : playExpected;
+    let target: PracticeCardValue['target'] = null;
+    bestOption.board.forEach((row, rowIndex) => row.forEach((placedCard, column) => {
+      if (placedCard?.id === card.id && board[rowIndex][column] === null) target = { row: rowIndex, column };
+    }));
+    cards[card.id] = {
+      playExpected,
+      discardExpected,
+      delta: playExpected - discardExpected,
+      recommended: bestOption.usedIds.has(card.id),
+      target,
+    };
+  });
+
+  return {
+    recommendation: bestOption.board,
+    expectedScore: values.get(bestOption) ?? 0,
+    samples: sampleCount,
+    approximate: waveIndex < 2,
+    cards,
+  };
+}
+
+export function chooseAiBoard(board: Board, hand: Card[], placeCount: number): Board {
+  const options = placementOptions(board, hand, placeCount);
+  let bestBoard = cloneBoard(board);
+  let bestValue = Number.NEGATIVE_INFINITY;
+  options.forEach((option) => {
+    const value = option.heuristic + Math.random() * 0.08;
+    if (value > bestValue) {
+      bestValue = value;
+      bestBoard = option.board;
+    }
   });
   return bestBoard;
 }
